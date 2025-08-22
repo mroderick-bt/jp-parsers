@@ -133,10 +133,6 @@ def convert_line_to_ruby_pairs(line: str):
         hira = item['hira']
         if is_katakana(orig):
             result.append((orig, None))
-#//        elif orig != hira:
-#//            result.append((orig, hira))
-#//        else:
-#//            result.append((orig, None))
         
         # If the token has no kanji, leave it as-is
         if not any(is_kanji(c) for c in orig):
@@ -150,15 +146,52 @@ def convert_line_to_ruby_pairs(line: str):
 
         # Token has a mix of kanji and kana/punctuation
         idx = 0
-        for ch in orig:
+        chars = list(orig)
+        i = 0
+        while i < len(chars):
+            ch = chars[i]
             if is_kanji(ch):
-                ch_hira = kks.convert(ch)[0]["hira"]
-                reading = hira[idx : idx + len(ch_hira)]
-                result.append((ch, reading))
-                idx += len(reading)
+                # Determine contiguous kanji run
+                j = i
+                while j < len(chars) and is_kanji(chars[j]):
+                    j += 1
+
+                # Find reading boundary using the next non-kanji character
+                if j < len(chars):
+                    next_hira = kks.convert(chars[j])[0]["hira"]
+                    next_idx = hira.find(next_hira, idx)
+                    if next_idx == -1:
+                        next_idx = len(hira)
+                else:
+                    next_idx = len(hira)
+
+                kanji_reading = hira[idx:next_idx]
+                run = chars[i:j]
+
+                if len(kanji_reading) == len(run):
+                    for k, kc in enumerate(run):
+                        result.append((kc, kanji_reading[k]))
+                else:
+                    remaining = kanji_reading
+                    for k, kc in enumerate(run):
+                        if k == len(run) - 1:
+                            reading = remaining
+                        else:
+                            guess = kks.convert(kc)[0]["hira"]
+                            if remaining.startswith(guess):
+                                reading = guess
+                            else:
+                                reading = remaining[0]
+                            remaining = remaining[len(reading):]
+                        result.append((kc, reading))
+
+                idx = next_idx
+                i = j
             else:
+                ch_hira = kks.convert(ch)[0]["hira"]
                 result.append((ch, None))
-                idx += len(kks.convert(ch)[0]["hira"])
+                idx += len(ch_hira)
+                i += 1
     return result
 
 def add_ruby_eq_field(paragraph, base_text, ruby_text, base_font_size_pt=16):
