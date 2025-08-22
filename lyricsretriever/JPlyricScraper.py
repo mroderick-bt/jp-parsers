@@ -5,9 +5,13 @@ import os
 import time
 import threading
 import time
+import sys
+from pathlib import Path
 
-from JMRParser import create_docx_with_eq_fields
-from JMRParser import generate_obsidian_lyric_file
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from shared.JMRParser import create_docx_with_eq_fields, generate_obsidian_lyric_file
 
 from bs4 import BeautifulSoup
 
