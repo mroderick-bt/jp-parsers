@@ -17,6 +17,55 @@ import re
 
 kks = kakasi()
 
+# Mapping of counters with their special readings
+COUNTER_MAPPINGS = {
+    "人": {
+        1: "ひとり",
+        2: "ふたり",
+        3: "さんにん",
+        4: "よにん",
+        5: "ごにん",
+        6: "ろくにん",
+        7: "ななにん",
+        8: "はちにん",
+        9: "きゅうにん",
+        10: "じゅうにん",
+    },
+    "日": {
+        1: "ついたち",
+        2: "ふつか",
+        3: "みっか",
+        4: "よっか",
+        5: "いつか",
+        6: "むいか",
+        7: "なのか",
+        8: "ようか",
+        9: "ここのか",
+        10: "とおか",
+        14: "じゅうよっか",
+        20: "はつか",
+        24: "にじゅうよっか",
+    },
+    "月": {
+        1: "いちがつ",
+        2: "にがつ",
+        3: "さんがつ",
+        4: "しがつ",
+        5: "ごがつ",
+        6: "ろくがつ",
+        7: "しちがつ",
+        8: "はちがつ",
+        9: "くがつ",
+        10: "じゅうがつ",
+        11: "じゅういちがつ",
+        12: "じゅうにがつ",
+    },
+}
+
+_COUNTER_PATTERN = re.compile(
+    r"(\d+)(" + "|".join(map(re.escape, COUNTER_MAPPINGS.keys())) + r")"
+)
+
 skipped_line_message = [None]
 log_path = os.path.join(os.path.dirname(sys.argv[0]), "furigana_parser.log")
 logging.basicConfig(
@@ -63,15 +112,53 @@ def heavy_initialization():
 def is_kanji(char: str) -> bool:
     return '一' <= char <= '龯'
 
+def is_katakana(text: str) -> bool:
+    """Return True if the entire string consists of Katakana characters."""
+    return bool(text) and all('\u30A0' <= ch <= '\u30FF' for ch in text)
+
 def convert_line_to_ruby_pairs(line: str):
+    def _replace_counters(text: str) -> str:
+        def _repl(match: re.Match) -> str:
+            num = int(match.group(1))
+            counter = match.group(2)
+            reading = COUNTER_MAPPINGS.get(counter, {}).get(num)
+            return reading if reading else match.group(0)
+
+        return _COUNTER_PATTERN.sub(_repl, text)
+
+    line = _replace_counters(line)
     result = []
     for item in kks.convert(line):
         orig = item['orig']
         hira = item['hira']
-        if orig != hira:
-            result.append((orig, hira))
-        else:
+        if is_katakana(orig):
             result.append((orig, None))
+#//        elif orig != hira:
+#//            result.append((orig, hira))
+#//        else:
+#//            result.append((orig, None))
+        
+        # If the token has no kanji, leave it as-is
+        if not any(is_kanji(c) for c in orig):
+            result.append((orig, None))
+            continue
+
+        # If the token is entirely kanji, keep the existing mapping
+        if all(is_kanji(c) for c in orig):
+            result.append((orig, hira))
+            continue
+
+        # Token has a mix of kanji and kana/punctuation
+        idx = 0
+        for ch in orig:
+            if is_kanji(ch):
+                ch_hira = kks.convert(ch)[0]["hira"]
+                reading = hira[idx : idx + len(ch_hira)]
+                result.append((ch, reading))
+                idx += len(reading)
+            else:
+                result.append((ch, None))
+                idx += len(kks.convert(ch)[0]["hira"])
     return result
 
 def add_ruby_eq_field(paragraph, base_text, ruby_text, base_font_size_pt=16):
