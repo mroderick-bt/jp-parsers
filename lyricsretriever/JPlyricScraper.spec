@@ -1,9 +1,19 @@
+# JPlyricScraper.spec
 # -*- mode: python ; coding: utf-8 -*-
+import sys
+import inspect
+from pathlib import Path
 
+# Path to this .spec file
+spec_path = Path(inspect.getframeinfo(inspect.currentframe()).filename).resolve()
+
+# Repository root (one directory above lyricsretriever/)
+REPO_ROOT = spec_path.parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
 a = Analysis(
     ['JPlyricScraper.py'],
-    pathex=[str(jp-parsers)]
+    pathex=[str(REPO_ROOT)],
     binaries=[],
     datas=[('C:/Users/untit/AppData/Local/Programs/Python/Python310/Lib/site-packages/pykakasi/data', 'pykakasi/data')],
     hiddenimports=[],
@@ -15,7 +25,6 @@ a = Analysis(
     optimize=0,
 )
 pyz = PYZ(a.pure)
-
 exe = EXE(
     pyz,
     a.scripts,

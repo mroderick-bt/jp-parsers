@@ -8,6 +8,15 @@ import time
 import sys
 from pathlib import Path
 
+TRACK_NO_RE = re.compile(r'^\s*(\d{1,3})\s*[\.．]?\s*')
+
+def parse_track_no(title: str) -> int | None:
+    m = TRACK_NO_RE.match(title or "")
+    return int(m.group(1)) if m else None
+
+def strip_track_prefix(title: str) -> str:
+    return TRACK_NO_RE.sub("", title or "").strip()
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -161,12 +170,12 @@ class UtaNetScraperApp(tk.Tk):
         search_frame.pack(fill="x", padx=10, pady=10)
 
         self.search_var = tk.StringVar()
-        ttk.Label(search_frame, text="Search term (Artist ID/Name or Song Title):").pack(side="left", padx=5)
-        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=40)
+        ttk.Label(search_frame).pack(side="left", padx=5)
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=60)
         self.search_entry.pack(side="left", padx=5)
 
-        ttk.Button(search_frame, text="Search Artist", command=self.threaded_search_artist).pack(side="left", padx=5)
-        ttk.Button(search_frame, text="Search Song", command=self.threaded_search_song).pack(side="left", padx=5)
+        ttk.Button(search_frame, text="Artist", command=self.threaded_search_artist).pack(side="left", padx=5)
+        ttk.Button(search_frame, text="Song", command=self.threaded_search_song).pack(side="left", padx=5)
 
         path_frame = ttk.Frame(self)
         path_frame.pack(fill="x", padx=10, pady=5)
@@ -181,6 +190,7 @@ class UtaNetScraperApp(tk.Tk):
         scrollbar = ttk.Scrollbar(results_frame, orient="vertical", command=self.results_list.yview)
         scrollbar.pack(side="right", fill="y")
         self.results_list.config(yscrollcommand=scrollbar.set)
+        self.results_list.bind("<Double-Button-1>", self.on_results_double_click)
 
         actions_frame = ttk.Frame(self)
         actions_frame.pack(fill="x", padx=10, pady=5)
@@ -257,7 +267,26 @@ class UtaNetScraperApp(tk.Tk):
                 self.create_docx_button.config(state='normal')
                 self.fetch_lyrics_button.config(state='normal')
         threading.Thread(target=task, daemon=True).start()
-        
+    def threaded_scan_playlist(self):
+        def task():
+            self.clear_button.config(state='disabled')
+            self.create_docx_button.config(state='disabled')
+            self.fetch_lyrics_button.config(state='disabled')
+            try:
+                self.scan_playlist_action()
+            finally:
+                self.clear_button.config(state='normal')
+                self.create_docx_button.config(state='normal')
+                self.fetch_lyrics_button.config(state='normal')
+        threading.Thread(target=task, daemon=True).start()
+
+    def on_results_double_click(self, event):
+        index = self.results_list.nearest(event.y)
+        if index >= 0:
+            self.results_list.selection_clear(0, tk.END)
+            self.results_list.selection_set(index)
+            self.results_list.activate(index)
+        self.threaded_fetch_lyrics()        
 
     def search_artist_action(self):
         term = self.search_var.get().strip()
@@ -381,33 +410,33 @@ class UtaNetScraperApp(tk.Tk):
             self.safe_insert_results("info", "Done", "Lyrics saved for selected songs.")
 
     def save_album_lyrics(self, artist_name, album, tracks, save_folder):
-        #out_dir = os.path.join(save_folder, sanitize_filename(artist_name))
-        #os.makedirs(out_dir, exist_ok=True)
+        # Use the largest number we can parse from any title as total_tracks
+        nums = [n for (t, _) in tracks if (n := parse_track_no(t))]
+        total_tracks = max(nums) if nums else len(tracks)
 
-        total_tracks = len(tracks)
-
-        for i, (title, url) in enumerate(tracks):
+        for i, (title, url) in enumerate(tracks, start=1):
             time.sleep(REQUEST_DELAY)
             lyrics = fetch_lyrics(url)
             if not lyrics:
                 print(f"[⚠️] Missing lyrics for {title}")
                 continue
 
-            track_num = i + 1
+            track_num = parse_track_no(title) or i   # ← use the title’s number
             lyrics_lines = lyrics.strip().splitlines()
 
             generate_obsidian_lyric_file(
                 lyrics_lines=lyrics_lines,
-                song_title=re.sub(r"^\d+\s*[\.．]?\s*", "", title).strip(),
+                song_title=strip_track_prefix(title),  # pretty title (no leading digits)
                 artist=artist_name,
                 album=album,
-                track_number=track_num,
-                total_tracks=total_tracks,
-                track_titles = [title for title, _ in tracks],
+                track_number=track_num,                # ← now from the title
+                total_tracks=total_tracks,             # ← from parsed max
+                track_titles=[t for t, _ in tracks],
                 output_root=self.save_path.get()
             )
-            self.safe_insert_results(f"✔️ Exported Obsidian MD: {track_num:02d}. {title}")
-        print(f"✔️ Saved all lyrics to vault")
+            self.safe_insert_results(f"✔️ Exported Obsidian MD: {title}")
+
+            print(f"✔️ Saved all lyrics to vault")
 
     def create_docx_action(self):
         selections = self.results_list.curselection()

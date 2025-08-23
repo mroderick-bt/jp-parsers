@@ -1,11 +1,7 @@
-import os
-import logging
-import sys
+import os, sys, logging, time, re, json
 import requests
-import json
 import zipfile
-import openpyxl
-import time
+import openpyxl, time
 from openpyxl.styles import Font
 from typing import List, Optional
 from docx import Document
@@ -13,54 +9,34 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt
 from pykakasi import kakasi
-import re
+
 
 kks = kakasi()
 
 # Mapping of counters with their special readings
 COUNTER_MAPPINGS = {
     "人": {
-        1: "ひとり",
-        2: "ふたり",
-        3: "さんにん",
-        4: "よにん",
-        5: "ごにん",
-        6: "ろくにん",
-        7: "ななにん",
-        8: "はちにん",
-        9: "きゅうにん",
-        10: "じゅうにん",
-    },
-    "日": {
-        1: "ついたち",
-        2: "ふつか",
-        3: "みっか",
-        4: "よっか",
-        5: "いつか",
-        6: "むいか",
-        7: "なのか",
-        8: "ようか",
-        9: "ここのか",
-        10: "とおか",
-        14: "じゅうよっか",
-        20: "はつか",
-        24: "にじゅうよっか",
-    },
-    "月": {
-        1: "いちがつ",
-        2: "にがつ",
-        3: "さんがつ",
-        4: "しがつ",
-        5: "ごがつ",
-        6: "ろくがつ",
-        7: "しちがつ",
-        8: "はちがつ",
-        9: "くがつ",
-        10: "じゅうがつ",
-        11: "じゅういちがつ",
-        12: "じゅうにがつ",
-    },
+        1: "{一人|ひとり}",
+        2: "{二人|ふたり}",
+        3: "{三人|さんにん}",
+        4: "{四人|よにん}",
+        5: "{五人|ごにん}",
+        6: "{六人|ろくにん}",
+        7: "{七人|ななにん}",
+        8: "{八人|はちにん}",
+        9: "{九人|きゅうにん}",
+        10: "{十人|じゅうにん}",
+    }
 }
+# prefer きみ over くん for standalone 君
+PREFERRED_READING = {
+    "君": "きみ",   
+}
+
+def fs_safe(name: str) -> str:
+    # replace forbidden chars with "_", and avoid trailing dot/space (Windows)
+    name = re.sub(r'[<>:"/\\|?*`#^\[\]]+', "_", name)
+    return name.rstrip(" .") or "_"
 
 _COUNTER_PATTERN = re.compile(
     r"(\d+)(" + "|".join(map(re.escape, COUNTER_MAPPINGS.keys())) + r")"
@@ -123,7 +99,6 @@ def convert_line_to_ruby_pairs(line: str):
             counter = match.group(2)
             reading = COUNTER_MAPPINGS.get(counter, {}).get(num)
             return reading if reading else match.group(0)
-
         return _COUNTER_PATTERN.sub(_repl, text)
 
     line = _replace_counters(line)
@@ -131,9 +106,12 @@ def convert_line_to_ruby_pairs(line: str):
     for item in kks.convert(line):
         orig = item['orig']
         hira = item['hira']
+
+        # Katakana → keep as-is (no ruby) and don't process it again
         if is_katakana(orig):
             result.append((orig, None))
-        
+            continue
+
         # If the token has no kanji, leave it as-is
         if not any(is_kanji(c) for c in orig):
             result.append((orig, None))
@@ -180,9 +158,14 @@ def convert_line_to_ruby_pairs(line: str):
                             guess = kks.convert(kc)[0]["hira"]
                             if remaining.startswith(guess):
                                 reading = guess
+                                if remaining:
+                                    remaining = remaining[len(reading):]
                             else:
-                                reading = remaining[0]
-                            remaining = remaining[len(reading):]
+                                if remaining:
+                                    reading = remaining[0]
+                                    remaining = remaining[1:]
+                                else:
+                                    reading = guess or ""
                         result.append((kc, reading))
 
                 idx = next_idx
@@ -192,6 +175,40 @@ def convert_line_to_ruby_pairs(line: str):
                 result.append((ch, None))
                 idx += len(ch_hira)
                 i += 1
+
+    # -------- Preferred reading overrides ---------------------------------
+
+    def _is_name_suffix_context(prev_base: str) -> bool:
+        """Return True when previous token looks like a name part (so '君' is likely a suffix)."""
+        if not prev_base:
+            return False
+        # Japanese letters
+        if any('\u4E00' <= c <= '\u9FFF' or '\u3040' <= c <= '\u30FF' for c in prev_base):
+            return True
+        # ASCII letters/digits or middle dot / long vowel mark often used in names
+        if re.search(r'[A-Za-z0-9]', prev_base) or '・' in prev_base or 'ー' in prev_base:
+            return True
+        return False
+
+    for n, (base, reading) in enumerate(result):
+        pref = PREFERRED_READING.get(base)
+        if not pref or not reading:
+            continue
+
+        # Normalize entry: accept "reading" or ("reading","mode")
+        if isinstance(pref, tuple):
+            pref_reading, mode = pref[0], (pref[1] if len(pref) > 1 else "always")
+        else:
+            pref_reading, mode = pref, "always"
+
+        if mode == "standalone":
+            prev_base = result[n-1][0] if n > 0 else ""
+            if _is_name_suffix_context(prev_base):
+                continue  # keep original reading (likely ～君 suffix)
+
+        # Apply override
+        result[n] = (base, pref_reading)
+
     return result
 
 def add_ruby_eq_field(paragraph, base_text, ruby_text, base_font_size_pt=16):
@@ -223,18 +240,30 @@ def add_ruby_eq_field(paragraph, base_text, ruby_text, base_font_size_pt=16):
 
 def generate_obsidian_lyric_file(
     lyrics_lines: List[str],
-    song_title: str,
+    song_title: str,           # display title (unsanitized; e.g., "AM6:30")
     artist: str,
     album: str,
-    track_number: int,
-    total_tracks: int,
-    track_titles: List[str],
+    track_number: int,         # album number for this song (e.g., 2)
+    total_tracks: int,         # highest album number
+    track_titles: List[str],   # raw titles (may include numbers)
     output_root: str = "Lyrics"
 ):
-    """
-    Create a structured Obsidian Markdown file with furigana lyrics, YAML metadata, and album links.
-    """
-    
+    # 0) Skip if there are no real lyrics
+    if not lyrics_lines or not any((ln or "").strip() for ln in lyrics_lines):
+        return None
+
+    # Helpers (local so this function is self-contained)
+    TRACK_NO_RE = re.compile(r'^\s*(\d{1,3})\s*[\.．]?\s*')
+    def parse_track_no(title: str) -> int | None:
+        m = TRACK_NO_RE.match(title or "")
+        return int(m.group(1)) if m else None
+    def strip_track_prefix(title: str) -> str:
+        return TRACK_NO_RE.sub("", title or "").strip()
+    def sanitize_filename(text: str) -> str:
+        # safe for Windows/macOS/Linux
+        text = re.sub(r'[<>:"/\\|?*`#^\[\]]+', "_", text or "")
+        return text.rstrip(" .") or "_"
+
     def line_to_furigana(line: str) -> str:
         pairs = convert_line_to_ruby_pairs(line)
         return ''.join(
@@ -242,63 +271,62 @@ def generate_obsidian_lyric_file(
             for base, reading in pairs
         )
 
-    # File path logic
-    def sanitize_filename(text):
-        return re.sub(r'[\\/:\*\?"<>|]', '_', text)
-
-    folder_path = os.path.join(output_root, "Lyrics", sanitize_filename(artist), sanitize_filename(album))
+    # 1) Paths
+    folder_path = os.path.join(
+        output_root, "Lyrics",
+        sanitize_filename(artist),
+        sanitize_filename(album),
+    )
     os.makedirs(folder_path, exist_ok=True)
 
-    filename = f"{track_number:02d}. {song_title}.md"
+    filename = f"{track_number:02d}. {sanitize_filename(song_title)}.md"
     file_path = os.path.join(folder_path, filename)
 
-    if track_number > 1:
-        prev_title = re.sub(r"^\d+\s*[\.．]?\s*", "", track_titles[track_number - 2]).strip()
-        previous_filename = f"{track_number - 1:02d}. {prev_title}"
-    else:
-        previous_filename = None
+    # 2) Build map: album number -> plain title (for accurate prev/next)
+    num_to_title = {}
+    for t in track_titles:
+        n = parse_track_no(t)
+        if n:  # only map those we can number
+            num_to_title.setdefault(n, strip_track_prefix(t))
 
-    if track_number < total_tracks:
-        next_title = re.sub(r"^\d+\s*[\.．]?\s*", "", track_titles[track_number].strip())
-        next_filename = f"{track_number + 1:02d}. {next_title}"
-    else:
-        next_filename = None
+    prev_num = track_number - 1 if track_number > 1 else None
+    next_num = track_number + 1 if track_number < total_tracks else None
 
-    # Start writing the file
+    previous_filename = (
+        f"{prev_num:02d}. {sanitize_filename(num_to_title[prev_num])}"
+        if (prev_num and prev_num in num_to_title) else None
+    )
+    next_filename = (
+        f"{next_num:02d}. {sanitize_filename(num_to_title[next_num])}"
+        if (next_num and next_num in num_to_title) else None
+    )
+
+    # 3) Write file
     with open(file_path, "w", encoding="utf-8") as f:
-        # YAML frontmatter
         f.write("---\n")
-        f.write(f"title: {song_title}\n")
+        f.write(f"title: {song_title}\n")     # display title (unsanitized)
         f.write(f"artist: {artist}\n")
         f.write(f"album: {album}\n")
         f.write(f"track: {track_number}\n")
         f.write("tags: [lyrics, japanese, furigana]\n")
         f.write("language: ja\n")
-        f.write("---")
+        f.write("---\n\n")
 
-        # Heading
-        # f.write(f"## {track_number:02d}. {song_title}\n\n")
-
-        # Navigation links
         if previous_filename:
-            f.write(f" ← [[{previous_filename}]]\n")
-
+            f.write(f"← [[{previous_filename}]]\n")
         f.write("[[link]]\n\n")
 
-        # Lyrics
         for line in lyrics_lines:
-            if line.strip() == "":
-                f.write("\n")
-            else:
-                f.write(line_to_furigana(line.strip()) + "\n")
+            s = (line or "").strip()
+            f.write((line_to_furigana(s) if s else "") + "\n")
 
         f.write("\n")
         if next_filename:
-            f.write(f"[[{next_filename}]] → \n")
-
+            f.write(f"[[{next_filename}]] →\n")
         f.write("\n[[link]]\n")
 
-    return file_path  # for logging/testing
+    return file_path
+
 
 def create_docx_with_eq_fields(input_path, output_path):
     document = Document()
